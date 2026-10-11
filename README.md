@@ -4,7 +4,7 @@
 
 ## 下载
 
-请前往 [Releases](https://github.com/TrueWor1d/PowerShift/releases)，下载所需版本的 `PowerShift-V版本号-x64.zip`，解压后运行 `PowerShift.exe`。
+请前往 [Releases] 下载所需版本的 `PowerShift-V版本号-x64.zip`，解压后运行 `PowerShift.exe`。
 
 ## 使用
 
