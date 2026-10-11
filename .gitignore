@@ -1,0 +1,6 @@
+/build*/
+/dist/
+/.vs/
+/out/
+*.user
+*.pdb

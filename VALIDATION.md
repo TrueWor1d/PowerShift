@@ -1,0 +1,20 @@
+# PowerShift V1.0 验证记录
+
+## 本次已完成
+
+- 用户已试用本次交付 EXE，并反馈「使用正常」。此反馈作为基本使用验证；未提供具体 Windows 版本或各项专项测试记录。
+- 用户验证的 `PowerShift.exe` SHA-256：`757358506ca71d0125add33e5a0b3a4a388e4b5d6039589fe4b28eb86f84a53b`。
+- 在 Linux x64 环境使用 MinGW-w64 GCC 14-posix 和 CMake 4.4.4 交叉编译 Windows x64 GUI 程序及 Windows 集成测试程序。
+- 使用 `-Wall -Wextra -Wpedantic -Wconversion -Werror` 构建通过，交付程序采用 Release 优化及静态 GCC/C++ 运行库。
+- 检查 PE 文件：x64、GUI 子系统、文件版本 `1.0.0.0`、产品版本 `V1.0`。
+- 检查内嵌清单：普通用户权限 `asInvoker`、Common Controls v6、Per-Monitor V2 DPI 设置。
+- 检查多尺寸图标资源和程序导入表：依赖仅为 Windows 系统 DLL，没有额外 GCC、C++ 或线程运行库 DLL。
+- 使用 Wine 10.0 执行 `PowerShiftTests.exe --registry-only`，通过：首次运行配置启动、中文及空格路径正确引用、已启用项目移动路径更新、关闭后不自动恢复、外部删除后不恢复、无关项目保持不变、非法路径不会更改状态。测试只写入隔离测试注册表路径。
+
+## 尚未完成
+
+- 不同 Windows 版本覆盖、重新登录启动、资源管理器重启、睡眠恢复及缩放比例等专项验收，尚未收到逐项测试记录。
+- 本次交付 EXE 使用交叉编译；尚未实际运行 MSVC 构建。源码包含 MSVC/CMake 构建脚本及 Windows CI 配置。
+- Wine 完整测试在 `PowerGetActiveScheme` 返回 `ERROR_CALL_NOT_IMPLEMENTED`（120）后停止。Wine 不提供本环境所需的真实 Windows 电源管理功能，此结果不作为 Windows 实机验证通过的证据。
+
+Windows 上运行 `scripts/build.ps1 -Test` 可执行默认的真实 API 读取及隔离注册表测试；在测试机执行 `PowerShiftTests.exe --switch` 可检查切换并恢复原计划。专项验收方法见 README。
