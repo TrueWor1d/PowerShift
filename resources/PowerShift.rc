@@ -5,8 +5,8 @@ IDI_POWERSHIFT ICON "PowerShift.ico"
 IDR_MANIFEST RT_MANIFEST "PowerShift.manifest"
 
 1 VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0
  FILEOS VOS_NT_WINDOWS32
@@ -19,11 +19,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "PowerShift\0"
       VALUE "FileDescription", "PowerShift - Windows Power Plan Switcher\0"
-      VALUE "FileVersion", "1.0.0.0\0"
+      VALUE "FileVersion", "1.1.0.0\0"
       VALUE "InternalName", "PowerShift\0"
       VALUE "OriginalFilename", "PowerShift.exe\0"
       VALUE "ProductName", "PowerShift\0"
-      VALUE "ProductVersion", "V1.0\0"
+      VALUE "ProductVersion", "V1.1\0"
     END
   END
   BLOCK "VarFileInfo"

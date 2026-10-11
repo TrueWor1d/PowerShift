@@ -1,4 +1,6 @@
-PowerShift V1.0（Windows 10/11 x64）
+PowerShift V1.1（Windows 10/11 x64）
+
+本版修改：调整右键菜单显示期间的窗口层级，菜单关闭后恢复原层级。
 
 1. 解压后，把 PowerShift.exe 放在固定文件夹，双击运行。
 2. 右键任务栏右下角的闪电图标，选择电源计划。圆点表示当前计划。
@@ -13,5 +15,5 @@ PowerShift V1.0（Windows 10/11 x64）
 启动项默认不需要管理员权限；组织策略可能限制启动或电源计划切换。
 如果在任务管理器中禁用了 PowerShift 启动项，需要在那里重新启用。
 
-本版已获用户试用反馈「使用正常」。
-源码、构建方法和详细验证范围见源码包 README.md 与 VALIDATION.md。
+其他版本的运行 ZIP 请前往 GitHub Release 下载：
+https://github.com/TrueWor1d/PowerShift/releases

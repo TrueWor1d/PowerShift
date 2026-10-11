@@ -16,4 +16,4 @@ $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Copy-Item (Join-Path $build 'Release/PowerShift.exe') $dist -Force
 Copy-Item (Join-Path $root '使用说明.txt') $dist -Force
-Write-Host "PowerShift V1.0: $dist"
+Write-Host "PowerShift V1.1: $dist"

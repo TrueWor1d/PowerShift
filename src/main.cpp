@@ -28,6 +28,30 @@ constexpr size_t kMaxMenuPlans = 50000;
 constexpr GUID kTrayGuid{0xa059d10e, 0x8b80, 0x4a37,
     {0x9b, 0x8c, 0x57, 0x95, 0x41, 0x18, 0x34, 0xe2}};
 
+class ScopedMenuTopmost {
+public:
+    explicit ScopedMenuTopmost(HWND window) noexcept
+        : window_(window), wasTopmost_((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) {}
+    ScopedMenuTopmost(const ScopedMenuTopmost&) = delete;
+    ScopedMenuTopmost& operator=(const ScopedMenuTopmost&) = delete;
+    ~ScopedMenuTopmost() {
+        if (changed_)
+            SetWindowPos(window_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    bool Enable() noexcept {
+        if (wasTopmost_) return true;
+        changed_ = SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) != FALSE;
+        return changed_;
+    }
+
+private:
+    HWND window_;
+    bool wasTopmost_;
+    bool changed_ = false;
+};
+
 class TrayApp {
 public:
     TrayApp(HINSTANCE instance, UINT taskbarMessage, std::wstring executable)
@@ -176,10 +200,21 @@ private:
 
         UpdateTooltip();
         point = MenuPosition(point);
-        SetForegroundWindow(window_);
-        const UINT selected = static_cast<UINT>(TrackPopupMenuEx(menu.get(),
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-            point.x, point.y, window_, nullptr));
+        UINT selected = 0;
+        {
+            // Keep the menu's owner above the taskbar while the popup is visible.
+            // Restore its original level before executing the selected command.
+            ScopedMenuTopmost topmost(window_);
+            if (!topmost.Enable()) {
+                const DWORD error = GetLastError();
+                ShowError(window_, L"无法置顶托盘菜单。", error);
+                return;
+            }
+            SetForegroundWindow(window_);
+            selected = static_cast<UINT>(TrackPopupMenuEx(menu.get(),
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                point.x, point.y, window_, nullptr));
+        }
         PostMessageW(window_, WM_NULL, 0, 0);
         if (iconAdded_) Shell_NotifyIconW(NIM_SETFOCUS, &notification_);
 

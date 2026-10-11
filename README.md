@@ -1,6 +1,10 @@
-# PowerShift V1.0
+# PowerShift V1.1
 
 一个 C++17 编写的 Windows 原生电源计划托盘工具。右键托盘图标选择计划，首次运行自动配置当前用户登录后启动。
+
+## 下载
+
+请前往 [Releases](https://github.com/TrueWor1d/PowerShift/releases)，下载所需版本的 `PowerShift-V版本号-x64.zip`，解压后运行 `PowerShift.exe`。
 
 ## 使用
 
@@ -69,9 +73,9 @@ cmake -S . -B build-mingw -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-x64.cmake -DCMAKE_B
 cmake --build build-mingw
 ```
 
-MinGW 构建静态链接 GCC/C++ 运行库，运行依赖为 Windows 自带 DLL。V1.0 的交付 EXE 如使用交叉编译，具体工具与验证范围见 `VALIDATION.md`。Windows 上的 MSVC 构建是推荐的后续发布流程。
+MinGW 构建静态链接 GCC/C++ 运行库，运行依赖为 Windows 自带 DLL。各版本的构建工具与验证范围见 `VALIDATION.md`。Windows 上的 MSVC 构建是推荐的后续发布流程。
 
-项目同时提供 `.github/workflows/windows-build.yml`，推送到 GitHub 后会使用 Windows runner 构建、执行默认集成测试并保存 EXE。具体结果以仓库 Actions 页面为准。
+项目使用 Windows runner 和 MSVC 构建并执行集成测试。发布版本标签后，会生成对应版本的运行 ZIP 并上传到 Release；发布说明仅列出相对上一版本的改动。发布流程见 `RELEASING.md`。
 
 ## 官方接口文档
 

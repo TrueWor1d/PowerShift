@@ -1,0 +1,150 @@
+name: Publish releases
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      pending: ${{ steps.plan.outputs.pending }}
+    steps:
+      - name: Find versions missing a release ZIP
+        id: plan
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tags = await github.paginate(github.rest.repos.listTags, context.repo);
+            const releases = await github.paginate(github.rest.repos.listReleases, context.repo);
+            const versions = tags.filter(tag => /^v\d+\.\d+(\.\d+)?$/.test(tag.name));
+            versions.sort((left, right) => {
+              const a = left.name.slice(1).split('.').map(Number);
+              const b = right.name.slice(1).split('.').map(Number);
+              for (let i = 0; i < 3; ++i) {
+                const difference = (a[i] || 0) - (b[i] || 0);
+                if (difference) return difference;
+              }
+              return left.name.localeCompare(right.name);
+            });
+            const latest = versions.length ? versions[versions.length - 1].name : '';
+            const pending = versions.filter(tag => {
+              const release = releases.find(item => item.tag_name === tag.name && !item.draft);
+              const name = `PowerShift-V${tag.name.slice(1)}-x64.zip`;
+              return !release || !release.assets.some(asset => asset.name === name && asset.state === 'uploaded');
+            }).map(tag => ({ tag: tag.name, latest: tag.name === latest }));
+            core.setOutput('matrix', JSON.stringify({ include: pending }));
+            core.setOutput('pending', String(pending.length > 0));
+
+  publish:
+    needs: plan
+    if: needs.plan.outputs.pending == 'true'
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    concurrency:
+      group: release-${{ matrix.tag }}
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ matrix.tag }}
+      MAKE_LATEST: ${{ matrix.latest }}
+    steps:
+      - name: Check whether this ZIP is already published
+        id: needed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let complete = false;
+            try {
+              const { data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag: process.env.RELEASE_TAG });
+              const name = `PowerShift-V${process.env.RELEASE_TAG.slice(1)}-x64.zip`;
+              complete = !release.draft && release.assets.some(asset => asset.name === name && asset.state === 'uploaded');
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            core.setOutput('publish', String(!complete));
+      - name: Check out release configuration
+        if: steps.needed.outputs.publish == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: publication
+      - name: Check out the version being published
+        if: steps.needed.outputs.publish == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ matrix.tag }}
+          path: source
+      - name: Check release notes
+        if: steps.needed.outputs.publish == 'true'
+        shell: pwsh
+        run: |
+          $notes = Join-Path $env:GITHUB_WORKSPACE "publication/.github/release-notes/${env:RELEASE_TAG}.md"
+          if (!(Test-Path -LiteralPath $notes) -or [string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $notes -Raw))) {
+              throw "Missing release notes for $env:RELEASE_TAG."
+          }
+      - name: Build with MSVC and run Windows integration tests
+        if: steps.needed.outputs.publish == 'true'
+        shell: pwsh
+        run: ./source/scripts/build.ps1 -Test
+      - name: Verify version and create ZIP
+        if: steps.needed.outputs.publish == 'true'
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'source/dist/PowerShift.exe'
+          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+          if ($info.ProductVersion -ne "V$version") {
+              throw "EXE version $($info.ProductVersion) does not match $env:RELEASE_TAG."
+          }
+          $instructions = Join-Path $env:GITHUB_WORKSPACE 'source/dist/使用说明.txt'
+          $zip = Join-Path $env:GITHUB_WORKSPACE "PowerShift-V$version-x64.zip"
+          Compress-Archive -LiteralPath $exe, $instructions -DestinationPath $zip
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+              if (!$archive.GetEntry('PowerShift.exe') -or !$archive.GetEntry('使用说明.txt')) {
+                  throw 'ZIP does not contain the executable and instructions.'
+              }
+          } finally { $archive.Dispose() }
+          Get-FileHash -LiteralPath $zip -Algorithm SHA256
+      - name: Upload ZIP and publish Release
+        if: steps.needed.outputs.publish == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const tag = process.env.RELEASE_TAG;
+            const name = `PowerShift-V${tag.slice(1)}-x64.zip`;
+            const zip = path.join(process.env.GITHUB_WORKSPACE, name);
+            const body = fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, 'publication', '.github', 'release-notes', `${tag}.md`), 'utf8').trim();
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              release = (await github.rest.repos.createRelease({ ...context.repo, tag_name: tag, name: `PowerShift V${tag.slice(1)}`, body, draft: true, prerelease: false })).data;
+            }
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: release.id });
+            if (!assets.some(asset => asset.name === name && asset.state === 'uploaded')) {
+              await github.rest.repos.uploadReleaseAsset({ ...context.repo, release_id: release.id, name,
+                data: fs.readFileSync(zip), headers: { 'content-type': 'application/zip', 'content-length': fs.statSync(zip).size } });
+            }
+            const { data: published } = await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id,
+              name: `PowerShift V${tag.slice(1)}`, body, draft: false, prerelease: false,
+              make_latest: process.env.MAKE_LATEST === 'true' ? 'true' : 'false' });
+            core.notice(published.html_url);
+      - name: Save the release ZIP as a build artifact
+        if: steps.needed.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PowerShift-${{ matrix.tag }}-x64
+          path: PowerShift-V*-x64.zip
