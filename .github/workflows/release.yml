@@ -34,11 +34,14 @@ jobs:
               return left.name.localeCompare(right.name);
             });
             const latest = versions.length ? versions[versions.length - 1].name : '';
-            const pending = versions.filter(tag => {
+            const pending = versions.map(tag => {
               const release = releases.find(item => item.tag_name === tag.name && !item.draft);
               const name = `PowerShift-V${tag.name.slice(1)}-x64.zip`;
-              return !release || !release.assets.some(asset => asset.name === name && asset.state === 'uploaded');
-            }).map(tag => ({ tag: tag.name, latest: tag.name === latest }));
+              const replace = context.eventName === 'push' && context.ref === `refs/tags/${tag.name}`;
+              const asset = release && release.assets.find(item => item.name === name && item.state === 'uploaded');
+              const complete = asset && (!replace || asset.label === `source:${tag.commit.sha}`);
+              return complete ? null : { tag: tag.name, sha: tag.commit.sha, latest: tag.name === latest, replace };
+            }).filter(Boolean);
             core.setOutput('matrix', JSON.stringify({ include: pending }));
             core.setOutput('pending', String(pending.length > 0));
 
@@ -56,6 +59,8 @@ jobs:
       cancel-in-progress: false
     env:
       RELEASE_TAG: ${{ matrix.tag }}
+      RELEASE_SHA: ${{ matrix.sha }}
+      REPLACE_ZIP: ${{ matrix.replace }}
       MAKE_LATEST: ${{ matrix.latest }}
     steps:
       - name: Check whether this ZIP is already published
@@ -67,7 +72,9 @@ jobs:
             try {
               const { data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag: process.env.RELEASE_TAG });
               const name = `PowerShift-V${process.env.RELEASE_TAG.slice(1)}-x64.zip`;
-              complete = !release.draft && release.assets.some(asset => asset.name === name && asset.state === 'uploaded');
+              const asset = release.assets.find(item => item.name === name && item.state === 'uploaded');
+              complete = !release.draft && asset && (process.env.REPLACE_ZIP !== 'true' ||
+                asset.label === `source:${process.env.RELEASE_SHA}`);
             } catch (error) {
               if (error.status !== 404) throw error;
             }
@@ -87,6 +94,11 @@ jobs:
         if: steps.needed.outputs.publish == 'true'
         shell: pwsh
         run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE 'source'
+          $actual = git -C $source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:RELEASE_SHA) {
+              throw 'The version tag changed during publication.'
+          }
           $notes = Join-Path $env:GITHUB_WORKSPACE "publication/.github/release-notes/${env:RELEASE_TAG}.md"
           if (!(Test-Path -LiteralPath $notes) -or [string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $notes -Raw))) {
               throw "Missing release notes for $env:RELEASE_TAG."
@@ -122,6 +134,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
+            const crypto = require('crypto');
             const tag = process.env.RELEASE_TAG;
             const name = `PowerShift-V${tag.slice(1)}-x64.zip`;
             const zip = path.join(process.env.GITHUB_WORKSPACE, name);
@@ -134,9 +147,37 @@ jobs:
               release = (await github.rest.repos.createRelease({ ...context.repo, tag_name: tag, name: `PowerShift V${tag.slice(1)}`, body, draft: true, prerelease: false })).data;
             }
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: release.id });
-            if (!assets.some(asset => asset.name === name && asset.state === 'uploaded')) {
-              await github.rest.repos.uploadReleaseAsset({ ...context.repo, release_id: release.id, name,
-                data: fs.readFileSync(zip), headers: { 'content-type': 'application/zip', 'content-length': fs.statSync(zip).size } });
+            const existing = assets.find(asset => asset.name === name);
+            const label = `source:${process.env.RELEASE_SHA}`;
+            if (!existing || existing.state !== 'uploaded' ||
+                (process.env.REPLACE_ZIP === 'true' && existing.label !== label)) {
+              const data = fs.readFileSync(zip);
+              const digest = `sha256:${crypto.createHash('sha256').update(data).digest('hex')}`;
+              const upload = async assetName => {
+                const { data: asset } = await github.rest.repos.uploadReleaseAsset({ ...context.repo,
+                  release_id: release.id, name: assetName, label, data,
+                  headers: { 'content-type': 'application/zip', 'content-length': data.length } });
+                if (asset.state !== 'uploaded' || asset.size !== data.length || (asset.digest && asset.digest !== digest)) {
+                  throw new Error('Uploaded ZIP verification failed.');
+                }
+                return asset;
+              };
+              if (existing) {
+                const suffix = `${context.runId}-${Date.now()}`;
+                const staged = await upload(`${name}.pending-${suffix}`);
+                await github.rest.repos.updateReleaseAsset({ ...context.repo, asset_id: existing.id,
+                  name: `${name}.previous-${suffix}` });
+                try {
+                  await github.rest.repos.updateReleaseAsset({ ...context.repo, asset_id: staged.id, name, label });
+                } catch (error) {
+                  await github.rest.repos.updateReleaseAsset({ ...context.repo, asset_id: existing.id, name });
+                  await github.rest.repos.deleteReleaseAsset({ ...context.repo, asset_id: staged.id });
+                  throw error;
+                }
+                await github.rest.repos.deleteReleaseAsset({ ...context.repo, asset_id: existing.id });
+              } else {
+                await upload(name);
+              }
             }
             const { data: published } = await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id,
               name: `PowerShift V${tag.slice(1)}`, body, draft: false, prerelease: false,

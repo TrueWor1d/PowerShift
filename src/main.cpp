@@ -28,30 +28,6 @@ constexpr size_t kMaxMenuPlans = 50000;
 constexpr GUID kTrayGuid{0xa059d10e, 0x8b80, 0x4a37,
     {0x9b, 0x8c, 0x57, 0x95, 0x41, 0x18, 0x34, 0xe2}};
 
-class ScopedMenuTopmost {
-public:
-    explicit ScopedMenuTopmost(HWND window) noexcept
-        : window_(window), wasTopmost_((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) {}
-    ScopedMenuTopmost(const ScopedMenuTopmost&) = delete;
-    ScopedMenuTopmost& operator=(const ScopedMenuTopmost&) = delete;
-    ~ScopedMenuTopmost() {
-        if (changed_)
-            SetWindowPos(window_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-
-    bool Enable() noexcept {
-        if (wasTopmost_) return true;
-        changed_ = SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) != FALSE;
-        return changed_;
-    }
-
-private:
-    HWND window_;
-    bool wasTopmost_;
-    bool changed_ = false;
-};
-
 class TrayApp {
 public:
     TrayApp(HINSTANCE instance, UINT taskbarMessage, std::wstring executable)
@@ -137,22 +113,62 @@ private:
         }
     }
 
-    POINT MenuPosition(POINT point) const noexcept {
-        if (point.x == -1 && point.y == -1) {
-            NOTIFYICONIDENTIFIER identifier{};
-            identifier.cbSize = sizeof(identifier);
-            identifier.hWnd = window_;
-            identifier.uID = notification_.uID;
-            identifier.guidItem = kTrayGuid;
-            RECT rectangle{};
-            if (SUCCEEDED(Shell_NotifyIconGetRect(&identifier, &rectangle)))
-                point = {rectangle.left + (rectangle.right - rectangle.left) / 2, rectangle.top};
-            else GetCursorPos(&point);
+    POINT MenuPosition(POINT point, TPMPARAMS& parameters, UINT& popupFlags) const noexcept {
+        NOTIFYICONIDENTIFIER identifier{};
+        identifier.cbSize = sizeof(identifier);
+        identifier.hWnd = window_;
+        identifier.uID = notification_.uID;
+        identifier.guidItem = kTrayGuid;
+        RECT iconRectangle{};
+        const bool hasIconRectangle = SUCCEEDED(Shell_NotifyIconGetRect(&identifier, &iconRectangle)) &&
+            !IsRectEmpty(&iconRectangle);
+        POINT iconPoint = point;
+        if (hasIconRectangle) {
+            iconPoint = {iconRectangle.left + (iconRectangle.right - iconRectangle.left) / 2,
+                iconRectangle.top + (iconRectangle.bottom - iconRectangle.top) / 2};
+        } else if (point.x == -1 && point.y == -1) {
+            iconPoint = {};
+            GetCursorPos(&iconPoint);
         }
+        if (point.x == -1 && point.y == -1) point = iconPoint;
+
+        parameters.cbSize = sizeof(parameters);
+        parameters.rcExclude = hasIconRectangle ? iconRectangle :
+            RECT{iconPoint.x, iconPoint.y, iconPoint.x + 1, iconPoint.y + 1};
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        const bool hasMonitor = GetMonitorInfoW(MonitorFromPoint(iconPoint, MONITOR_DEFAULTTONEAREST), &monitor) != FALSE;
+
+        // Capture the icon's top-level host before SetForegroundWindow can dismiss it.
+        // Exclude the whole overflow panel/taskbar, rather than only the icon itself.
+        const HWND host = GetAncestor(WindowFromPoint(iconPoint), GA_ROOT);
+        RECT hostRectangle{};
+        RECT exclusion{};
+        if (hasMonitor && host && host != window_ && host != GetDesktopWindow() && host != GetShellWindow() &&
+            IsWindowVisible(host) && GetWindowRect(host, &hostRectangle) &&
+            PtInRect(&hostRectangle, iconPoint) &&
+            IntersectRect(&exclusion, &hostRectangle, &monitor.rcMonitor) &&
+            !(exclusion.left <= monitor.rcWork.left && exclusion.top <= monitor.rcWork.top &&
+                exclusion.right >= monitor.rcWork.right && exclusion.bottom >= monitor.rcWork.bottom)) {
+            parameters.rcExclude = exclusion;
+        }
+
+        // Anchor at a panel edge so the complete native menu can open outside it.
+        // Windows resolves limited space and side-mounted taskbars using rcExclude.
+        point.x = std::clamp(point.x, parameters.rcExclude.left, parameters.rcExclude.right - 1);
+        const bool openAbove = !hasMonitor ||
+            parameters.rcExclude.top - monitor.rcWork.top >= monitor.rcWork.bottom - parameters.rcExclude.bottom;
+        point.y = openAbove ? parameters.rcExclude.top : parameters.rcExclude.bottom;
+        popupFlags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_VERTICAL | TPM_WORKAREA |
+            (openAbove ? TPM_BOTTOMALIGN : TPM_TOPALIGN) |
+            (GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN);
         return point;
     }
 
     void ShowMenu(POINT point) {
+        TPMPARAMS parameters{};
+        UINT popupFlags = 0;
+        point = MenuPosition(point, parameters, popupFlags);
         UniqueMenu menu(CreatePopupMenu());
         if (!menu) { ShowError(window_, L"无法创建托盘菜单。", GetLastError()); return; }
         bool built = true;
@@ -199,22 +215,9 @@ private:
         if (!built) { ShowError(window_, L"无法完成托盘菜单。", ERROR_GEN_FAILURE); return; }
 
         UpdateTooltip();
-        point = MenuPosition(point);
-        UINT selected = 0;
-        {
-            // Keep the menu's owner above the taskbar while the popup is visible.
-            // Restore its original level before executing the selected command.
-            ScopedMenuTopmost topmost(window_);
-            if (!topmost.Enable()) {
-                const DWORD error = GetLastError();
-                ShowError(window_, L"无法置顶托盘菜单。", error);
-                return;
-            }
-            SetForegroundWindow(window_);
-            selected = static_cast<UINT>(TrackPopupMenuEx(menu.get(),
-                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                point.x, point.y, window_, nullptr));
-        }
+        SetForegroundWindow(window_);
+        const UINT selected = static_cast<UINT>(TrackPopupMenuEx(menu.get(), popupFlags,
+            point.x, point.y, window_, &parameters));
         PostMessageW(window_, WM_NULL, 0, 0);
         if (iconAdded_) Shell_NotifyIconW(NIM_SETFOCUS, &notification_);
 
