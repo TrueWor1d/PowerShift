@@ -293,7 +293,14 @@ private:
         } else if (selected == kPowerErrorCommand) {
             ShowError(window_, L"无法读取 Windows 电源计划。", powerError);
         } else if (selected == kPowerOptionsCommand) {
-            const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window_, L"open", L"control.exe",
+            wchar_t directory[MAX_PATH]{};
+            const UINT length = GetSystemDirectoryW(directory, static_cast<UINT>(std::size(directory)));
+            if (!length || length >= std::size(directory)) {
+                ShowError(window_, L"无法定位 Windows 电源选项。", length ? ERROR_FILENAME_EXCED_RANGE : GetLastError());
+                return;
+            }
+            const std::wstring control = std::wstring(directory) + L"\\control.exe";
+            const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window_, L"open", control.c_str(),
                 L"/name Microsoft.PowerOptions", nullptr, SW_SHOWNORMAL));
             if (result <= 32) {
                 const DWORD error = result == SE_ERR_FNF ? ERROR_FILE_NOT_FOUND :

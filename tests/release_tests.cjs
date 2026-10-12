@@ -14,7 +14,7 @@ function fixture(t, { tag = 'v1.2', fresh = false, label = `source:${oldSha}` } 
   const zipPath = path.join(directory, 'release.zip');
   fs.writeFileSync(zipPath, Buffer.from('bytes from the validated build'));
   const name = `PowerShift-V${tag.slice(1)}-x64.zip`;
-  const body = fs.readFileSync(path.join(root, '.github/release-notes', `${tag}.md`), 'utf8').trim();
+  const body = fs.readFileSync(path.join(root, '.github/release-notes', `${tag}.md`), 'utf8').replace(/\r\n/g, '\n').trim();
   const context = { repo: { owner: 'test', repo: 'PowerShift' }, eventName: 'push', ref: `refs/tags/${tag}`, runId: 50 };
   const state = { releases: fresh ? [] : [{ id: 1, tag_name: tag, name: `PowerShift V${tag.slice(1)}`,
     body: 'old notes', draft: false, prerelease: false,
@@ -144,6 +144,11 @@ test('planning includes unfinished metadata even when the ZIP is ready', async t
   assert.equal(outputs.pending, 'true');
   assert.equal(JSON.parse(outputs.matrix).include[0].tag, 'v1.2');
   assert.deepEqual(await f.inspect(), { publish: 'true', build: 'false' });
+});
+test('Windows and Unix line endings do not trigger a needless republish', async t => {
+  const f = fixture(t, { label: `source:${sha}` });
+  f.state.releases[0].body = f.body.replace(/\n/g, '\r\n');
+  assert.deepEqual(await f.inspect(), { publish: 'false', build: 'false' });
 });
 test('Latest is recalculated from published runtime ZIPs using numeric versions', async t => {
   const f = fixture(t, { label: `source:${sha}` });

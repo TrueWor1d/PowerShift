@@ -177,7 +177,9 @@ BOOL TestTrackPopupMenuEx(HMENU, UINT flags, int x, int y, HWND, LPTPMPARAMS par
     return 0;
 }
 HINSTANCE TestShellExecuteW(HWND, LPCWSTR, LPCWSTR file, LPCWSTR arguments, LPCWSTR, int) {
-    fixture::state.powerOptionsOpened = std::wstring(file) == L"control.exe" &&
+    wchar_t directory[MAX_PATH]{};
+    GetSystemDirectoryW(directory, MAX_PATH);
+    fixture::state.powerOptionsOpened = std::wstring(file) == std::wstring(directory) + L"\\control.exe" &&
         std::wstring(arguments) == L"/name Microsoft.PowerOptions";
     return reinterpret_cast<HINSTANCE>(static_cast<UINT_PTR>(33));
 }
