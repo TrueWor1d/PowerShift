@@ -15,5 +15,6 @@ if ($Test) {
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Copy-Item (Join-Path $build 'Release/PowerShift.exe') $dist -Force
-Copy-Item (Join-Path $root '使用说明.txt') $dist -Force
-Write-Host "PowerShift V1.1: $dist"
+Copy-Item (Join-Path $build 'generated/使用说明.txt') $dist -Force
+$version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $dist 'PowerShift.exe')).ProductVersion
+Write-Host "PowerShift ${version}: $dist"

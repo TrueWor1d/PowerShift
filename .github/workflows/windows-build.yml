@@ -11,9 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build with MSVC and run Windows integration tests
+        id: build
         shell: pwsh
-        run: ./scripts/build.ps1 -Test
+        run: |
+          ./scripts/build.ps1 -Test
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'dist/PowerShift.exe'
+          $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Verify publication recovery
+        run: node tests/release_tests.cjs
       - uses: actions/upload-artifact@v4
         with:
-          name: PowerShift-V1.1-x64
+          name: PowerShift-${{ steps.build.outputs.version }}-x64
           path: dist/

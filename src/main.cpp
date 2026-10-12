@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <iterator>
 #include <new>
+#include <string_view>
 
 namespace powershift {
 namespace {
@@ -20,18 +21,38 @@ constexpr wchar_t kMutexName[] = L"Local\\PowerShift.SingleInstance";
 constexpr UINT kTrayCallback = WM_APP + 1;
 constexpr UINT kShowMenu = WM_APP + 2;
 constexpr UINT_PTR kTrayRetryTimer = 1;
+constexpr UINT_PTR kPowerRefreshTimer = 2;
+constexpr UINT kInitialRetryDelay = 2000;
+constexpr UINT kMaximumRetryDelay = 30000;
 constexpr UINT kStartupCommand = 1;
 constexpr UINT kExitCommand = 2;
 constexpr UINT kPowerErrorCommand = 3;
+constexpr UINT kPowerOptionsCommand = 4;
+constexpr UINT kAboutCommand = 5;
 constexpr UINT kFirstPlanCommand = 1000;
 constexpr size_t kMaxMenuPlans = 50000;
 constexpr GUID kTrayGuid{0xa059d10e, 0x8b80, 0x4a37,
     {0x9b, 0x8c, 0x57, 0x95, 0x41, 0x18, 0x34, 0xe2}};
 
+struct MenuScope {
+    bool& open;
+    explicit MenuScope(bool& value) noexcept : open(value) { open = true; }
+    ~MenuScope() { open = false; }
+    MenuScope(const MenuScope&) = delete;
+    MenuScope& operator=(const MenuScope&) = delete;
+};
+
 class TrayApp {
 public:
     TrayApp(HINSTANCE instance, UINT taskbarMessage, std::wstring executable)
         : instance_(instance), taskbarMessage_(taskbarMessage), executable_(std::move(executable)) {}
+    ~TrayApp() noexcept {
+        // Destroy the window while all members referenced by its procedure are alive.
+        if (window_) DestroyWindow(window_);
+        Stop();
+    }
+    TrayApp(const TrayApp&) = delete;
+    TrayApp& operator=(const TrayApp&) = delete;
 
     bool Start() {
         HICON icon = nullptr;
@@ -50,8 +71,15 @@ public:
         notification_.guidItem = kTrayGuid;
         UpdateTooltip();
         TryAddIcon();
-        powerNotification_ = RegisterPowerSettingNotification(window_, &GUID_POWERSCHEME_PERSONALITY,
+        powerNotification_ = RegisterPowerSettingNotification(window_, &GUID_ACTIVE_POWERSCHEME,
             DEVICE_NOTIFY_WINDOW_HANDLE);
+        if (!powerNotification_) {
+            powerNotification_ = RegisterPowerSettingNotification(window_, &GUID_POWERSCHEME_PERSONALITY,
+                DEVICE_NOTIFY_WINDOW_HANDLE);
+            // Personality notifications alone miss switches between custom plans of the same type.
+            if (!SetTimer(window_, kPowerRefreshTimer, 10000, nullptr))
+                OutputDebugStringW(L"PowerShift: could not schedule fallback power status refresh.\n");
+        }
 
         const DWORD startupError = startup_.Initialize(executable_);
         if (startupError != ERROR_SUCCESS)
@@ -82,34 +110,56 @@ public:
     }
 
 private:
-    void UpdateTooltip() {
+    void UpdateTooltip(const GUID* knownActive = nullptr, const std::vector<PowerPlan>* knownPlans = nullptr) {
         GUID active{};
         std::wstring name;
-        if (ReadActivePlan(active) != ERROR_SUCCESS || ReadPlanName(active, name) != ERROR_SUCCESS)
+        if (knownActive) active = *knownActive;
+        const bool readable = knownActive || ReadActivePlan(active) == ERROR_SUCCESS;
+        if (readable && knownPlans) {
+            const auto found = std::find_if(knownPlans->begin(), knownPlans->end(), [&](const PowerPlan& plan) {
+                return IsEqualGUID(plan.id, active) != FALSE;
+            });
+            if (found != knownPlans->end()) name = found->name;
+        }
+        if (!readable || (name.empty() && ReadPlanName(active, name) != ERROR_SUCCESS))
             name = L"暂时无法读取";
         std::wstring text = std::wstring(kAppTitle) + L"\n当前电源计划：" + name;
         size_t size = std::min(text.size(), std::size(notification_.szTip) - 1);
         // Avoid cutting a UTF-16 surrogate pair at the tooltip's size limit.
         if (size > 0 && text[size - 1] >= 0xD800 && text[size - 1] <= 0xDBFF) --size;
+        lastTooltipRefresh_ = GetTickCount64();
+        if (std::wstring_view(notification_.szTip) == std::wstring_view(text.data(), size)) return;
         std::copy_n(text.data(), size, notification_.szTip);
         notification_.szTip[size] = L'\0';
         if (iconAdded_) Shell_NotifyIconW(NIM_MODIFY, &notification_);
     }
 
     void TryAddIcon() {
-        if (Shell_NotifyIconW(NIM_ADD, &notification_)) {
+        bool added = Shell_NotifyIconW(NIM_ADD, &notification_) != FALSE;
+        if (!added && (notification_.uFlags & NIF_GUID)) {
+            // An unsigned EXE moved to a new path cannot reuse its old GUID registration.
+            NOTIFYICONDATAW fallback = notification_;
+            fallback.uFlags &= ~NIF_GUID;
+            fallback.guidItem = {};
+            if (Shell_NotifyIconW(NIM_ADD, &fallback)) {
+                notification_ = fallback;
+                added = true;
+            }
+        }
+        if (added) {
             iconAdded_ = true;
             notification_.uVersion = NOTIFYICON_VERSION_4;
             version4_ = Shell_NotifyIconW(NIM_SETVERSION, &notification_) != FALSE;
-            retryCount_ = 0;
+            retryDelay_ = kInitialRetryDelay;
             KillTimer(window_, kTrayRetryTimer);
         } else {
             iconAdded_ = false;
-            if (!SetTimer(window_, kTrayRetryTimer, 2000, nullptr)) {
+            if (!SetTimer(window_, kTrayRetryTimer, retryDelay_, nullptr)) {
                 const DWORD error = GetLastError();
                 ShowError(window_, L"无法等待 Windows 托盘就绪。", error);
                 PostMessageW(window_, WM_CLOSE, 0, 0);
             }
+            retryDelay_ = std::min(retryDelay_ * 2, kMaximumRetryDelay);
         }
     }
 
@@ -118,7 +168,7 @@ private:
         identifier.cbSize = sizeof(identifier);
         identifier.hWnd = window_;
         identifier.uID = notification_.uID;
-        identifier.guidItem = kTrayGuid;
+        if (notification_.uFlags & NIF_GUID) identifier.guidItem = notification_.guidItem;
         RECT iconRectangle{};
         const bool hasIconRectangle = SUCCEEDED(Shell_NotifyIconGetRect(&identifier, &iconRectangle)) &&
             !IsRectEmpty(&iconRectangle);
@@ -166,6 +216,8 @@ private:
     }
 
     void ShowMenu(POINT point) {
+        if (menuOpen_) return;
+        MenuScope menuScope(menuOpen_);
         TPMPARAMS parameters{};
         UINT popupFlags = 0;
         point = MenuPosition(point, parameters, popupFlags);
@@ -211,10 +263,14 @@ private:
         if (startupError != ERROR_SUCCESS) startupFlags |= MF_GRAYED;
         append(startupFlags, kStartupCommand,
             startupError == ERROR_SUCCESS ? L"开机启动" : L"开机启动（无法读取）");
+        append(MF_STRING, kPowerOptionsCommand, L"电源选项…");
+        append(MF_STRING, kAboutCommand, L"关于 PowerShift…");
+        append(MF_SEPARATOR, 0, nullptr);
         append(MF_STRING, kExitCommand, L"退出");
         if (!built) { ShowError(window_, L"无法完成托盘菜单。", ERROR_GEN_FAILURE); return; }
 
-        UpdateTooltip();
+        UpdateTooltip(activeError == ERROR_SUCCESS ? &active : nullptr,
+            powerError == ERROR_SUCCESS ? &plans : nullptr);
         SetForegroundWindow(window_);
         const UINT selected = static_cast<UINT>(TrackPopupMenuEx(menu.get(), popupFlags,
             point.x, point.y, window_, &parameters));
@@ -236,13 +292,29 @@ private:
             if (error != ERROR_SUCCESS) ShowError(window_, L"无法更改开机启动设置。", error);
         } else if (selected == kPowerErrorCommand) {
             ShowError(window_, L"无法读取 Windows 电源计划。", powerError);
+        } else if (selected == kPowerOptionsCommand) {
+            const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(window_, L"open", L"control.exe",
+                L"/name Microsoft.PowerOptions", nullptr, SW_SHOWNORMAL));
+            if (result <= 32) {
+                const DWORD error = result == SE_ERR_FNF ? ERROR_FILE_NOT_FOUND :
+                    result == SE_ERR_PNF ? ERROR_PATH_NOT_FOUND :
+                    result == SE_ERR_ACCESSDENIED ? ERROR_ACCESS_DENIED : ERROR_OPEN_FAILED;
+                ShowError(window_, L"无法打开 Windows 电源选项。", error);
+            }
+        } else if (selected == kAboutCommand) {
+            const std::wstring text = std::wstring(kAppTitle) +
+                L"\n\nWindows 原生电源计划托盘工具\n构建标识：" + kBuildRevision;
+            MessageBoxW(window_, text.c_str(), kAppTitle, MB_OK | MB_ICONINFORMATION);
         } else if (selected == kExitCommand) {
             DestroyWindow(window_);
         }
     }
 
     void Stop() noexcept {
-        KillTimer(window_, kTrayRetryTimer);
+        if (window_) {
+            KillTimer(window_, kTrayRetryTimer);
+            KillTimer(window_, kPowerRefreshTimer);
+        }
         if (powerNotification_) {
             UnregisterPowerSettingNotification(powerNotification_);
             powerNotification_ = nullptr;
@@ -257,7 +329,7 @@ private:
         if (message == taskbarMessage_) {
             iconAdded_ = false;
             version4_ = false;
-            retryCount_ = 0;
+            retryDelay_ = kInitialRetryDelay;
             UpdateTooltip();
             if (icon_) TryAddIcon();
             return 0;
@@ -265,6 +337,8 @@ private:
         switch (message) {
         case kTrayCallback: {
             const UINT event = version4_ ? LOWORD(lParam) : static_cast<UINT>(lParam);
+            if (event == WM_MOUSEMOVE && GetTickCount64() - lastTooltipRefresh_ >= 1000)
+                UpdateTooltip();
             if (event == WM_CONTEXTMENU || event == WM_RBUTTONUP || event == NIN_KEYSELECT) {
                 POINT point{-1, -1};
                 if (version4_) point = {GET_X_LPARAM(wParam), GET_Y_LPARAM(wParam)};
@@ -277,13 +351,8 @@ private:
             ShowMenu({-1, -1});
             return 0;
         case WM_TIMER:
-            if (wParam == kTrayRetryTimer) {
-                if (++retryCount_ > 30) {
-                    KillTimer(window_, kTrayRetryTimer);
-                    ShowError(window_, L"Windows 托盘尚未就绪，请稍后重新运行 PowerShift。", ERROR_NOT_READY);
-                    DestroyWindow(window_);
-                } else TryAddIcon();
-            }
+            if (wParam == kTrayRetryTimer && !iconAdded_) TryAddIcon();
+            if (wParam == kPowerRefreshTimer) UpdateTooltip();
             return 0;
         case WM_POWERBROADCAST:
             if (wParam == PBT_POWERSETTINGCHANGE || wParam == PBT_APMRESUMEAUTOMATIC ||
@@ -313,9 +382,12 @@ private:
             Stop();
             PostQuitMessage(0);
             return 0;
-        case WM_NCDESTROY:
-            SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
-            return DefWindowProcW(window_, message, wParam, lParam);
+        case WM_NCDESTROY: {
+            const HWND destroyed = window_;
+            SetWindowLongPtrW(destroyed, GWLP_USERDATA, 0);
+            window_ = nullptr;
+            return DefWindowProcW(destroyed, message, wParam, lParam);
+        }
         default:
             return DefWindowProcW(window_, message, wParam, lParam);
         }
@@ -331,7 +403,9 @@ private:
     StartupManager startup_;
     bool iconAdded_ = false;
     bool version4_ = false;
-    UINT retryCount_ = 0;
+    UINT retryDelay_ = kInitialRetryDelay;
+    ULONGLONG lastTooltipRefresh_ = 0;
+    bool menuOpen_ = false;
 };
 
 int Run(HINSTANCE instance) {

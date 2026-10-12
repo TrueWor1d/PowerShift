@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="1.1.0.0" processorArchitecture="*" name="PowerShift" type="win32"/>
-  <description>PowerShift V1.1</description>
+  <assemblyIdentity version="@POWERSHIFT_NUMERIC_VERSION@" processorArchitecture="*" name="PowerShift" type="win32"/>
+  <description>PowerShift V@POWERSHIFT_DISPLAY_VERSION@</description>
   <dependency><dependentAssembly>
     <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
       processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>

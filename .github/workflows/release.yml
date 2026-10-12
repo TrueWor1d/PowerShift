@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: powershift-release-publication
+  cancel-in-progress: false
+
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -16,34 +20,16 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       pending: ${{ steps.plan.outputs.pending }}
     steps:
-      - name: Find versions missing a release ZIP
+      - uses: actions/checkout@v4
+      - name: Verify publication recovery
+        run: node tests/release_tests.cjs
+      - name: Find incomplete publications
         id: plan
         uses: actions/github-script@v7
         with:
           script: |
-            const tags = await github.paginate(github.rest.repos.listTags, context.repo);
-            const releases = await github.paginate(github.rest.repos.listReleases, context.repo);
-            const versions = tags.filter(tag => /^v\d+\.\d+(\.\d+)?$/.test(tag.name));
-            versions.sort((left, right) => {
-              const a = left.name.slice(1).split('.').map(Number);
-              const b = right.name.slice(1).split('.').map(Number);
-              for (let i = 0; i < 3; ++i) {
-                const difference = (a[i] || 0) - (b[i] || 0);
-                if (difference) return difference;
-              }
-              return left.name.localeCompare(right.name);
-            });
-            const latest = versions.length ? versions[versions.length - 1].name : '';
-            const pending = versions.map(tag => {
-              const release = releases.find(item => item.tag_name === tag.name && !item.draft);
-              const name = `PowerShift-V${tag.name.slice(1)}-x64.zip`;
-              const replace = context.eventName === 'push' && context.ref === `refs/tags/${tag.name}`;
-              const asset = release && release.assets.find(item => item.name === name && item.state === 'uploaded');
-              const complete = asset && (!replace || asset.label === `source:${tag.commit.sha}`);
-              return complete ? null : { tag: tag.name, sha: tag.commit.sha, latest: tag.name === latest, replace };
-            }).filter(Boolean);
-            core.setOutput('matrix', JSON.stringify({ include: pending }));
-            core.setOutput('pending', String(pending.length > 0));
+            const { planReleases } = require('./.github/scripts/releases.cjs');
+            await planReleases({ github, context, core, root: process.env.GITHUB_WORKSPACE });
 
   publish:
     needs: plan
@@ -53,70 +39,66 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    concurrency:
-      group: release-${{ matrix.tag }}
-      cancel-in-progress: false
     env:
       RELEASE_TAG: ${{ matrix.tag }}
       RELEASE_SHA: ${{ matrix.sha }}
       REPLACE_ZIP: ${{ matrix.replace }}
-      MAKE_LATEST: ${{ matrix.latest }}
     steps:
-      - name: Check whether this ZIP is already published
+      - name: Check out release configuration
+        uses: actions/checkout@v4
+        with:
+          path: publication
+      - name: Check publication and ZIP independently
         id: needed
         uses: actions/github-script@v7
         with:
           script: |
-            let complete = false;
-            try {
-              const { data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag: process.env.RELEASE_TAG });
-              const name = `PowerShift-V${process.env.RELEASE_TAG.slice(1)}-x64.zip`;
-              const asset = release.assets.find(item => item.name === name && item.state === 'uploaded');
-              complete = !release.draft && asset && (process.env.REPLACE_ZIP !== 'true' ||
-                asset.label === `source:${process.env.RELEASE_SHA}`);
-            } catch (error) {
-              if (error.status !== 404) throw error;
-            }
-            core.setOutput('publish', String(!complete));
-      - name: Check out release configuration
-        if: steps.needed.outputs.publish == 'true'
-        uses: actions/checkout@v4
-        with:
-          path: publication
-      - name: Check out the version being published
-        if: steps.needed.outputs.publish == 'true'
+            const path = require('path');
+            const { checkPublication } = require('./publication/.github/scripts/releases.cjs');
+            await checkPublication({ github, context, core,
+              root: path.join(process.env.GITHUB_WORKSPACE, 'publication'), tag: process.env.RELEASE_TAG,
+              sha: process.env.RELEASE_SHA, replace: process.env.REPLACE_ZIP === 'true' });
+      - name: Check out the version being built
+        if: steps.needed.outputs.build == 'true'
         uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ matrix.tag }}
           path: source
-      - name: Check release notes
-        if: steps.needed.outputs.publish == 'true'
+      - name: Verify checked-out source
+        if: steps.needed.outputs.build == 'true'
         shell: pwsh
         run: |
-          $source = Join-Path $env:GITHUB_WORKSPACE 'source'
-          $actual = git -C $source rev-parse HEAD
+          $actual = git -C (Join-Path $env:GITHUB_WORKSPACE 'source') rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $actual -ne $env:RELEASE_SHA) {
               throw 'The version tag changed during publication.'
           }
-          $notes = Join-Path $env:GITHUB_WORKSPACE "publication/.github/release-notes/${env:RELEASE_TAG}.md"
-          if (!(Test-Path -LiteralPath $notes) -or [string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $notes -Raw))) {
-              throw "Missing release notes for $env:RELEASE_TAG."
-          }
       - name: Build with MSVC and run Windows integration tests
-        if: steps.needed.outputs.publish == 'true'
+        if: steps.needed.outputs.build == 'true'
         shell: pwsh
         run: ./source/scripts/build.ps1 -Test
-      - name: Verify version and create ZIP
-        if: steps.needed.outputs.publish == 'true'
+      - name: Verify version, architecture and create ZIP
+        if: steps.needed.outputs.build == 'true'
         shell: pwsh
         run: |
           $version = $env:RELEASE_TAG.Substring(1)
           $exe = Join-Path $env:GITHUB_WORKSPACE 'source/dist/PowerShift.exe'
           $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
-          if ($info.ProductVersion -ne "V$version") {
-              throw "EXE version $($info.ProductVersion) does not match $env:RELEASE_TAG."
+          $parts = @($version.Split('.'))
+          while ($parts.Count -lt 4) { $parts += '0' }
+          if ($info.ProductVersion -ne "V$version" -or $info.FileVersion -ne ($parts -join '.')) {
+              throw 'EXE version does not match the tag.'
           }
+          $reader = [System.IO.BinaryReader]::new([System.IO.File]::OpenRead($exe))
+          try {
+              $reader.BaseStream.Position = 0x3c
+              $peOffset = $reader.ReadInt32()
+              $reader.BaseStream.Position = $peOffset
+              if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0x8664) {
+                  throw 'Expected a Windows x64 executable.'
+              }
+          } finally { $reader.Dispose() }
           $instructions = Join-Path $env:GITHUB_WORKSPACE 'source/dist/使用说明.txt'
           $zip = Join-Path $env:GITHUB_WORKSPACE "PowerShift-V$version-x64.zip"
           Compress-Archive -LiteralPath $exe, $instructions -DestinationPath $zip
@@ -127,65 +109,38 @@ jobs:
               }
           } finally { $archive.Dispose() }
           Get-FileHash -LiteralPath $zip -Algorithm SHA256
-      - name: Upload ZIP and publish Release
+      - name: Finish publication and clean temporary assets
         if: steps.needed.outputs.publish == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const fs = require('fs');
             const path = require('path');
-            const crypto = require('crypto');
+            const { publishRelease } = require('./publication/.github/scripts/releases.cjs');
             const tag = process.env.RELEASE_TAG;
-            const name = `PowerShift-V${tag.slice(1)}-x64.zip`;
-            const zip = path.join(process.env.GITHUB_WORKSPACE, name);
-            const body = fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, 'publication', '.github', 'release-notes', `${tag}.md`), 'utf8').trim();
-            let release;
-            try {
-              release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag })).data;
-            } catch (error) {
-              if (error.status !== 404) throw error;
-              release = (await github.rest.repos.createRelease({ ...context.repo, tag_name: tag, name: `PowerShift V${tag.slice(1)}`, body, draft: true, prerelease: false })).data;
-            }
-            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: release.id });
-            const existing = assets.find(asset => asset.name === name);
-            const label = `source:${process.env.RELEASE_SHA}`;
-            if (!existing || existing.state !== 'uploaded' ||
-                (process.env.REPLACE_ZIP === 'true' && existing.label !== label)) {
-              const data = fs.readFileSync(zip);
-              const digest = `sha256:${crypto.createHash('sha256').update(data).digest('hex')}`;
-              const upload = async assetName => {
-                const { data: asset } = await github.rest.repos.uploadReleaseAsset({ ...context.repo,
-                  release_id: release.id, name: assetName, label, data,
-                  headers: { 'content-type': 'application/zip', 'content-length': data.length } });
-                if (asset.state !== 'uploaded' || asset.size !== data.length || (asset.digest && asset.digest !== digest)) {
-                  throw new Error('Uploaded ZIP verification failed.');
-                }
-                return asset;
-              };
-              if (existing) {
-                const suffix = `${context.runId}-${Date.now()}`;
-                const staged = await upload(`${name}.pending-${suffix}`);
-                await github.rest.repos.updateReleaseAsset({ ...context.repo, asset_id: existing.id,
-                  name: `${name}.previous-${suffix}` });
-                try {
-                  await github.rest.repos.updateReleaseAsset({ ...context.repo, asset_id: staged.id, name, label });
-                } catch (error) {
-                  await github.rest.repos.updateReleaseAsset({ ...context.repo, asset_id: existing.id, name });
-                  await github.rest.repos.deleteReleaseAsset({ ...context.repo, asset_id: staged.id });
-                  throw error;
-                }
-                await github.rest.repos.deleteReleaseAsset({ ...context.repo, asset_id: existing.id });
-              } else {
-                await upload(name);
-              }
-            }
-            const { data: published } = await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id,
-              name: `PowerShift V${tag.slice(1)}`, body, draft: false, prerelease: false,
-              make_latest: process.env.MAKE_LATEST === 'true' ? 'true' : 'false' });
-            core.notice(published.html_url);
+            const release = await publishRelease({ github, context,
+              root: path.join(process.env.GITHUB_WORKSPACE, 'publication'), tag,
+              sha: process.env.RELEASE_SHA, replace: process.env.REPLACE_ZIP === 'true',
+              zipPath: path.join(process.env.GITHUB_WORKSPACE, `PowerShift-V${tag.slice(1)}-x64.zip`) });
+            core.notice(release.html_url);
       - name: Save the release ZIP as a build artifact
-        if: steps.needed.outputs.publish == 'true'
+        if: steps.needed.outputs.build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: PowerShift-${{ matrix.tag }}-x64
           path: PowerShift-V*-x64.zip
+          if-no-files-found: error
+
+  latest:
+    needs: [plan, publish]
+    if: always() && needs.plan.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep the newest published ZIP as Latest
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { reconcileLatest } = require('./.github/scripts/releases.cjs');
+            await reconcileLatest({ github, context });

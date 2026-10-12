@@ -3,10 +3,9 @@
 #include <windows.h>
 #include <string>
 #include <utility>
+#include "powershift_version.h"
 
 namespace powershift {
-
-inline constexpr wchar_t kAppTitle[] = L"PowerShift V1.1";
 
 template<typename T, auto Close>
 class UniqueResource {

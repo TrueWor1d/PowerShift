@@ -1,12 +1,13 @@
 #include <windows.h>
 #include "resource.h"
+#include "powershift_version.h"
 
-IDI_POWERSHIFT ICON "PowerShift.ico"
-IDR_MANIFEST RT_MANIFEST "PowerShift.manifest"
+IDI_POWERSHIFT ICON "@CMAKE_CURRENT_SOURCE_DIR@/resources/PowerShift.ico"
+IDR_MANIFEST RT_MANIFEST "@CMAKE_CURRENT_BINARY_DIR@/generated/PowerShift.manifest"
 
 1 VERSIONINFO
- FILEVERSION 1,1,0,0
- PRODUCTVERSION 1,1,0,0
+ FILEVERSION POWERSHIFT_FILE_VERSION
+ PRODUCTVERSION POWERSHIFT_FILE_VERSION
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0
  FILEOS VOS_NT_WINDOWS32
@@ -19,11 +20,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "PowerShift\0"
       VALUE "FileDescription", "PowerShift - Windows Power Plan Switcher\0"
-      VALUE "FileVersion", "1.1.0.0\0"
+      VALUE "FileVersion", POWERSHIFT_FILE_VERSION_STRING
       VALUE "InternalName", "PowerShift\0"
       VALUE "OriginalFilename", "PowerShift.exe\0"
       VALUE "ProductName", "PowerShift\0"
-      VALUE "ProductVersion", "V1.1\0"
+      VALUE "ProductVersion", POWERSHIFT_PRODUCT_VERSION_STRING
     END
   END
   BLOCK "VarFileInfo"
